@@ -18,12 +18,14 @@ import System.Process (showCommandForUser)
 import Text.Read (readMaybe)
 import DA.Signals
 import DA.Daml.Helper.Init
+import DA.Daml.Helper.Jwt
 import DA.Daml.Helper.Ledger
 import DA.Daml.Helper.New
 import DA.Daml.Helper.Start
 import DA.Daml.Helper.Studio
 import DA.Daml.Helper.Util
 import DA.Daml.Helper.Codegen
+import qualified Data.Text as T
 
 import SdkVersion (withSdkVersions)
 
@@ -83,6 +85,7 @@ data Command
         { darPaths :: [String]
         , upgradeCheckTool :: UpgradeCheckTool
         }
+    | JwtCreate { jwtCreateOptions :: JwtCreateOptions }
 
 data UpgradeCheckTool = UCTParticipant | UCTCompiler | UCTBoth
   deriving (Show, Eq, Ord)
@@ -106,6 +109,7 @@ commandParser = subparser $ fold
     , command "sandbox" (info (cantonSandboxCmd <**> helper) cantonSandboxCmdInfo)
     , command "canton-console" (info (cantonReplCmd <**> helper) cantonReplCmdInfo)
     , command "upgrade-check" (info upgradeCheckCmd forwardOptions)
+    , command "jwt" (info (jwtCmd <**> helper) jwtCmdInfo)
     ]
   where
 
@@ -137,6 +141,29 @@ commandParser = subparser $ fold
     upgradeCheckCmd = UpgradeCheck
         <$> many (argument str (metavar "ARG"))
         <*> (flag' UCTParticipant (long "participant") <|> flag' UCTCompiler (long "compiler") <|> flag' UCTBoth (long "both"))
+
+    jwtCmdInfo = mconcat
+        [ progDesc "Build JWTs for the Daml Ledger API"
+        , forwardOptions
+        ]
+
+    jwtCmd = subparser $ command "create" $
+        info (jwtCreateCmd <**> helper) $
+            progDesc "Print a JWT for the Daml Ledger API on stdout"
+
+    jwtCreateCmd =
+        let userMode = UserMode <$> textOption (long "user" <> metavar "USER" <> help "Subject of a Ledger API user token")
+            ledgerApiMode = LedgerApiMode
+                <$> some (textOption (long "act-as" <> metavar "PARTY" <> help "Party the bearer may submit as (repeat for multi-party tokens)"))
+                <*> textOption (long "ledger-id" <> metavar "ID" <> help "Ledger ID, typically the participant ID")
+                <*> textOption (long "application-id" <> metavar "ID" <> help "Application ID submitting the commands")
+            mode = userMode <|> ledgerApiMode
+            scope = textOption (long "scope" <> metavar "SCOPE" <> value "daml_ledger_api" <> showDefault <> help "Scope claim for user tokens")
+            secret = textOption (long "secret" <> metavar "SECRET" <> value "secret" <> showDefault <> help "HMAC-SHA256 secret used to sign the token")
+        in fmap JwtCreate $ JwtCreateOptions <$> mode <*> scope <*> secret
+
+    textOption :: Mod OptionFields String -> Parser T.Text
+    textOption = fmap T.pack . strOption
 
     newCmd =
         let templateHelpStr = "Name of the template used to create the package (default: " <> defaultProjectTemplate <> ")"
@@ -519,3 +546,4 @@ runCommand = \case
           runJar "daml-sdk/daml-sdk.jar" (Just "daml-sdk/script-logback.xml") ("upgrade-check": darPaths)
         when (upgradeCheckTool `elem` [UCTCompiler, UCTBoth]) $
           runDamlc ("upgrade-check" : darPaths)
+    JwtCreate {..} -> runJwtCreate jwtCreateOptions
