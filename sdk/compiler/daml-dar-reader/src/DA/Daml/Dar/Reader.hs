@@ -33,7 +33,7 @@ import System.Exit
 import System.FilePath
 import System.IO
 
-data Format = PlainText | Json
+data Format = PlainText | Json | MainPackageId
 
 data InspectInfo = InspectInfo
     { files :: [FilePath]
@@ -111,6 +111,8 @@ renderInfo PlainText InspectInfo{..} = T.unlines $ concat
 renderInfo Json info =
     TL.toStrict (TL.toLazyText (encodePrettyToTextBuilder info))
     <> "\n"
+renderInfo MainPackageId InspectInfo{mainPackageId} =
+    LF.unPackageId mainPackageId <> "\n"
 
 inspectDar :: FilePath -> Format -> IO ()
 inspectDar inFile format = do

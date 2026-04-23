@@ -229,7 +229,6 @@ import Options.Applicative ((<|>),
                             command,
                             defaultPrefs,
                             execParserPure,
-                            flag,
                             flag',
                             forwardOptions,
                             fullDesc,
@@ -591,12 +590,16 @@ cmdInspectDar =
     command "inspect-dar" $
     info (helper <*> cmd) $ progDesc "Inspect a DAR archive" <> fullDesc
   where
-    jsonOpt =
-        flag InspectDar.PlainText InspectDar.Json $
-        long "json" <> help "Output the information in JSON"
+    formatOpt =
+        flag' InspectDar.Json
+            (long "json" <> help "Output the information in JSON")
+        <|> flag' InspectDar.MainPackageId
+            (long "main-package-id"
+             <> help "Print only the main package ID")
+        <|> pure InspectDar.PlainText
     cmd = execInspectDar
         <$> inputDarOpt
-        <*> jsonOpt
+        <*> formatOpt
 
 cmdValidateDar :: Mod CommandFields Command
 cmdValidateDar =
