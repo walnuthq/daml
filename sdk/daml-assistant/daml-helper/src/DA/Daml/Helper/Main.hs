@@ -20,11 +20,14 @@ import DA.Signals
 import DA.Daml.Helper.Init
 import DA.Daml.Helper.Jwt
 import DA.Daml.Helper.Ledger
+import qualified DA.Daml.Helper.LfJson as LfJson
 import DA.Daml.Helper.New
 import DA.Daml.Helper.Start
 import DA.Daml.Helper.Studio
 import DA.Daml.Helper.Util
 import DA.Daml.Helper.Codegen
+import qualified Data.Aeson as A
+import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Text as T
 
 import SdkVersion (withSdkVersions)
@@ -69,6 +72,7 @@ data Command
         , parties :: [String]
         , json :: JsonFlag
         }
+    | LedgerSubmitCmd { submitOpts :: SubmitOpts }
     | LedgerAllocateParties { flags :: LedgerFlags, parties :: [String] }
     | LedgerUploadDar { flags :: LedgerFlags, dryRun :: DryRun, darPathM :: Maybe FilePath }
     | LedgerFetchDar { flags :: LedgerFlags, pid :: String, saveAs :: FilePath }
@@ -287,6 +291,22 @@ commandParser = subparser $ fold
                     (progDesc "Fetch a single update (transaction) by its update-id"))
                  <**> helper)
                 (progDesc "Inspect updates (transactions) on the ledger")
+            , command "submit" $ info
+                (subparser (fold
+                    [ command "create" $ info
+                        (ledgerSubmitCreateCmd <**> helper)
+                        (progDesc "Submit a Create command and print the resulting update-id")
+                    , command "exercise" $ info
+                        (ledgerSubmitExerciseCmd <**> helper)
+                        (progDesc "Submit an Exercise command against a contract-id")
+                    , command "exercise-by-key" $ info
+                        (ledgerSubmitExerciseByKeyCmd <**> helper)
+                        (progDesc "Submit an ExerciseByKey command against a contract key")
+                    , command "create-and-exercise" $ info
+                        (ledgerSubmitCreateAndExerciseCmd <**> helper)
+                        (progDesc "Submit a CreateAndExercise command in one round-trip")
+                    ]) <**> helper)
+                (progDesc "Submit a ledger command and print the resulting update-id")
             ]
         , subparser $ internal <> fold -- hidden subcommands
             [ command "allocate-party" $ info
@@ -332,6 +352,123 @@ commandParser = subparser $ fold
         <*> some (strOption (long "party" <> metavar "PARTY"
             <> help "Requesting party (repeat for multi-party projection)"))
         <*> fmap JsonFlag (switch $ long "json" <> help "Output update as JSON")
+
+    ----------------------------------------------------------------------------
+    -- submit {create,exercise,exercise-by-key,create-and-exercise}
+    ----------------------------------------------------------------------------
+
+    templateRefArg :: Parser LfJson.TemplateRef
+    templateRefArg = argument (eitherReader LfJson.parseTemplateRef)
+        (metavar "TEMPLATE" <> help
+         "Template reference: '#pkg-name:Module.Sub:Entity' or '<package-id-hex>:Module:Entity'")
+
+    -- Both --arguments JSON and --arg key=value are accepted; using both at
+    -- once is rejected by argsInputOpt.
+    argsInputOpt :: String -> String -> Parser LfJson.ArgsInput
+    argsInputOpt longArg longJson = asum
+        [ LfJson.AIJson <$> option jsonReader
+            (long longJson <> metavar "JSON"
+             <> help "Record argument as JSON object (compressed format)")
+        , LfJson.AIPairs <$> many (option (eitherReader parseKv)
+            (long longArg <> metavar "KEY=VALUE"
+             <> help "Argument as key=value (repeat for multiple fields); flat records only"))
+        ]
+      where
+        jsonReader = eitherReader $ \s -> case A.eitherDecode (BSL.pack s) of
+            Left err -> Left $ "invalid JSON: " <> err
+            Right v  -> Right v
+
+    parseKv :: String -> Either String (String, String)
+    parseKv s = case break (== '=') s of
+        (_, "")       -> Left "expected KEY=VALUE"
+        (k, '=':v)    -> Right (k, v)
+        _             -> Left "expected KEY=VALUE"
+
+    actAsFlag :: Parser [String]
+    actAsFlag = some (strOption (long "act-as" <> metavar "PARTY"
+        <> help "Submitting party (repeat for multi-party)"))
+
+    readAsFlag :: Parser [String]
+    readAsFlag = many (strOption (long "read-as" <> metavar "PARTY"
+        <> help "Additional read-as party (repeatable)"))
+
+    userIdFlag :: Parser (Maybe String)
+    userIdFlag = optional (strOption (long "user-id" <> metavar "ID"
+        <> help "Daml user-id to submit under; defaults to 'daml-helper-<cmd-id>'"))
+
+    commandIdFlag :: Parser (Maybe String)
+    commandIdFlag = optional (strOption (long "command-id" <> metavar "ID"
+        <> help "Command-id for idempotent submission; defaults to a random UUID"))
+
+    darPathFlag :: Parser (Maybe FilePath)
+    darPathFlag = optional (strOption (long "dar" <> metavar "PATH"
+        <> help "Resolve template schema from a local DAR instead of the participant"))
+
+    jsonOutFlag :: Parser JsonFlag
+    jsonOutFlag = fmap JsonFlag (switch
+        (long "json" <> help "Output result as JSON (updateId, completionOffset, transaction)"))
+
+    submitCommon :: Parser (LfJson.TemplateRef, [String], [String], Maybe String, Maybe String, Maybe FilePath, JsonFlag, LedgerFlags)
+    submitCommon = do
+        tref <- templateRefArg
+        lf <- ledgerFlags
+        aas <- actAsFlag
+        ras <- readAsFlag
+        uid <- userIdFlag
+        cid <- commandIdFlag
+        dar <- darPathFlag
+        jsn <- jsonOutFlag
+        pure (tref, aas, ras, uid, cid, dar, jsn, lf)
+
+    mkSubmitOpts
+        :: (LfJson.TemplateRef, [String], [String], Maybe String, Maybe String, Maybe FilePath, JsonFlag, LedgerFlags)
+        -> SubmitCommandKind
+        -> SubmitOpts
+    mkSubmitOpts (tref, aas, ras, uid, cid, dar, jsn, lf) kind = SubmitOpts
+        { soFlags = lf
+        , soTemplate = tref
+        , soKind = kind
+        , soActAs = aas
+        , soReadAs = ras
+        , soUserId = uid
+        , soCommandId = cid
+        , soDarPath = dar
+        , soJson = jsn
+        }
+
+    ledgerSubmitCreateCmd :: Parser Command
+    ledgerSubmitCreateCmd = do
+        args <- argsInputOpt "arg" "arguments"
+        common <- submitCommon
+        pure $ LedgerSubmitCmd (mkSubmitOpts common (SubmitCreate args))
+
+    ledgerSubmitExerciseCmd :: Parser Command
+    ledgerSubmitExerciseCmd = do
+        args   <- argsInputOpt "arg" "arguments"
+        cid    <- strOption (long "contract-id" <> metavar "CID"
+                      <> help "Contract-id to exercise the choice on")
+        choice <- strOption (long "choice" <> metavar "CHOICE"
+                      <> help "Choice name")
+        common <- submitCommon
+        pure $ LedgerSubmitCmd (mkSubmitOpts common (SubmitExercise cid choice args))
+
+    ledgerSubmitExerciseByKeyCmd :: Parser Command
+    ledgerSubmitExerciseByKeyCmd = do
+        keyIn  <- argsInputOpt "key-arg" "key"
+        args   <- argsInputOpt "arg" "arguments"
+        choice <- strOption (long "choice" <> metavar "CHOICE"
+                      <> help "Choice name")
+        common <- submitCommon
+        pure $ LedgerSubmitCmd (mkSubmitOpts common (SubmitExerciseByKey keyIn choice args))
+
+    ledgerSubmitCreateAndExerciseCmd :: Parser Command
+    ledgerSubmitCreateAndExerciseCmd = do
+        createIn <- argsInputOpt "create-arg" "create-arguments"
+        args     <- argsInputOpt "arg" "arguments"
+        choice   <- strOption (long "choice" <> metavar "CHOICE"
+                        <> help "Choice name")
+        common   <- submitCommon
+        pure $ LedgerSubmitCmd (mkSubmitOpts common (SubmitCreateAndExercise createIn choice args))
 
     packagesListCmd = PackagesList
         <$> ledgerFlags
@@ -541,6 +678,11 @@ runCommand = \case
     Deploy {..} -> runDeploy flags
     LedgerListParties {..} -> runLedgerListParties flags json
     LedgerUpdateShow {..} -> runLedgerUpdateShow flags updateId parties json
+    LedgerSubmitCmd {..} -> case soKind submitOpts of
+        SubmitCreate{}            -> runLedgerSubmitCreate            submitOpts
+        SubmitExercise{}          -> runLedgerSubmitExercise          submitOpts
+        SubmitExerciseByKey{}     -> runLedgerSubmitExerciseByKey     submitOpts
+        SubmitCreateAndExercise{} -> runLedgerSubmitCreateAndExercise submitOpts
     PackagesList {..} -> runLedgerListPackages0 flags
     LedgerAllocateParties {..} -> runLedgerAllocateParties flags parties
     LedgerUploadDar {..} -> runLedgerUploadDar flags dryRun darPathM

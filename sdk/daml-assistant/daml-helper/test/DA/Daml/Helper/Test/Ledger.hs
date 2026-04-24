@@ -13,10 +13,15 @@ import qualified DA.Daml.LF.Ast.Base as LF
 import DA.Ledger.Services.PartyManagementService (PartyDetails(..))
 import DA.Ledger.Types (Party(..))
 import DA.Test.Sandbox
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (isInfixOf)
+import qualified Data.ByteString.UTF8 as BSU
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
+import qualified Data.Vector as V
 import System.Environment.Blank
 import System.Exit
 import System.FilePath
@@ -31,6 +36,44 @@ readDarMainPackageId dar = do
   archive <- Zip.toArchive <$> BSL.readFile dar
   InspectInfo {mainPackageId} <- either fail pure $ collectInfo archive
   pure $ T.unpack $ LF.unPackageId mainPackageId
+
+-- | Extract the first party whose identifier starts with the given prefix
+-- from a `ledger list-parties --json` output.
+partyByPrefix :: String -> String -> Maybe String
+partyByPrefix prefix out = case Aeson.decode (BSL.fromStrict (BSU.fromString out)) of
+    Just arr -> firstJust pickParty (arr :: [Aeson.Value])
+    Nothing  -> Nothing
+  where
+    pickParty (Aeson.Object o) = case AKM.lookup "party" o of
+        Just (Aeson.String s)
+          | prefix `isInfixOf` T.unpack s || prefix `isPrefixOf` T.unpack s -> Just (T.unpack s)
+        _ -> Nothing
+    pickParty _ = Nothing
+    firstJust _ [] = Nothing
+    firstJust f (x:xs) = case f x of
+        Just y -> Just y
+        Nothing -> firstJust f xs
+
+parseUpdateId :: String -> Maybe String
+parseUpdateId = parseStringField "updateId"
+
+parseContractId :: String -> Maybe String
+parseContractId = parseStringField "contract_id"
+
+parseStringField :: String -> String -> Maybe String
+parseStringField field out = case Aeson.eitherDecode (BSL.fromStrict (BSU.fromString out)) of
+    Right v -> findField (T.pack field) (v :: Aeson.Value)
+    Left _  -> Nothing
+  where
+    findField k (Aeson.Object o) = case AKM.lookup (AK.fromText k) o of
+        Just (Aeson.String s) -> Just (T.unpack s)
+        _ -> firstMatch (AKM.elems o)
+    findField _ (Aeson.Array xs) = firstMatch (V.toList xs)
+    findField _ _ = Nothing
+    firstMatch [] = Nothing
+    firstMatch (x:xs) = case findField (T.pack field) x of
+        Just y -> Just y
+        Nothing -> firstMatch xs
 
 -- | Check if the list-parties output contains a party like the one given
 -- Note the special behaviour needed to handle the `::identifier` on party names
@@ -54,6 +97,7 @@ main = do
     locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> exe "daml-helper")
   testDar <- locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> "test.dar")
   testDar2 <- locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> "test2.dar")
+  submitDar <- locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> "submit-test.dar")
   testDarUpgradeV1 <- locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> "upgrade-test-v1.dar")
   testDarUpgradeV2 <- locateRunfiles (mainWorkspace </> "daml-assistant" </> "daml-helper" </> "upgrade-test-v2.dar")
   defaultMain $
@@ -210,6 +254,130 @@ main = do
               -- assertBool "Error message did not contain expected DAR_NOT_VALID_UPGRADE" ("DAR_NOT_VALID_UPGRADE" `L.isInfixOf` out)
               -- assertBool "Error message did not contain expected reason" $
               --   "Reason: The upgraded data type T has added new fields, but those fields are not Optional." `L.isInfixOf` out
+          ]
+      , testGroup "submit"
+          [ testCase "create + update show round-trip (--dar mode)" $ do
+              sandboxPort <- getSandboxPort
+              callCommand $ unwords
+                [ damlHelper, "ledger", "allocate-party"
+                , "--host=localhost", "--port", show sandboxPort, "--timeout=120"
+                , "SubmitTestAlice"
+                ]
+              out <- readProcess damlHelper
+                  (words "ledger list-parties --json --host=localhost --port" <> [show sandboxPort]) ""
+              alice <- case partyByPrefix "SubmitTestAlice::" out of
+                  Just p -> pure p
+                  Nothing -> fail "allocated party not listed"
+              -- Upload submit-test.dar so canton vets its package.
+              callCommand $ unwords
+                [ damlHelper, "ledger", "upload-dar"
+                , "--host=localhost", "--port", show sandboxPort, submitDar
+                ]
+              -- submit create
+              createOut <- readProcess damlHelper
+                  [ "ledger", "submit", "create", "#submit-test:Submit:Counter"
+                  , "--arg", "owner=" <> alice, "--arg", "count=0"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", alice
+                  , "--dar", submitDar
+                  , "--json"
+                  ] ""
+              updateId <- case parseUpdateId createOut of
+                  Just u -> pure u
+                  Nothing -> assertFailure $ "no updateId in output: " <> createOut
+              -- Fetch the resulting update via `ledger update show`
+              showOut <- readProcess damlHelper
+                  [ "ledger", "update", "show", updateId
+                  , "--party", alice
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--json"
+                  ] ""
+              ("\"count\"" `isInfixOf` showOut && "\"owner\"" `isInfixOf` showOut) @?
+                  ("update show output is missing expected fields: " <> take 500 showOut)
+          , testCase "create then exercise on the returned contract-id" $ do
+              sandboxPort <- getSandboxPort
+              callCommand $ unwords
+                [ damlHelper, "ledger", "allocate-party"
+                , "--host=localhost", "--port", show sandboxPort, "--timeout=120"
+                , "SubmitExerciseAlice"
+                ]
+              out <- readProcess damlHelper
+                  (words "ledger list-parties --json --host=localhost --port" <> [show sandboxPort]) ""
+              alice <- case partyByPrefix "SubmitExerciseAlice::" out of
+                  Just p -> pure p
+                  Nothing -> fail "allocated party not listed"
+              createOut <- readProcess damlHelper
+                  [ "ledger", "submit", "create", "#submit-test:Submit:Counter"
+                  , "--arg", "owner=" <> alice, "--arg", "count=0"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", alice
+                  , "--dar", submitDar
+                  , "--json"
+                  ] ""
+              createUpdateId <- case parseUpdateId createOut of
+                  Just u -> pure u
+                  Nothing -> assertFailure "no updateId from create"
+              showOut <- readProcess damlHelper
+                  [ "ledger", "update", "show", createUpdateId
+                  , "--party", alice
+                  , "--host=localhost", "--port", show sandboxPort, "--json"
+                  ] ""
+              cid <- case parseContractId showOut of
+                  Just c -> pure c
+                  Nothing -> assertFailure "no contract_id in create result"
+              exerciseOut <- readProcess damlHelper
+                  [ "ledger", "submit", "exercise", "#submit-test:Submit:Counter"
+                  , "--contract-id", cid, "--choice", "Bump"
+                  , "--arg", "by=3"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", alice, "--dar", submitDar, "--json"
+                  ] ""
+              case parseUpdateId exerciseOut of
+                  Just _ -> pure ()
+                  Nothing -> assertFailure $ "no updateId from exercise: " <> exerciseOut
+          , testCase "create-and-exercise produces multiple events" $ do
+              sandboxPort <- getSandboxPort
+              callCommand $ unwords
+                [ damlHelper, "ledger", "allocate-party"
+                , "--host=localhost", "--port", show sandboxPort, "--timeout=120"
+                , "SubmitCAEAlice"
+                ]
+              out <- readProcess damlHelper
+                  (words "ledger list-parties --json --host=localhost --port" <> [show sandboxPort]) ""
+              alice <- case partyByPrefix "SubmitCAEAlice::" out of
+                  Just p -> pure p
+                  Nothing -> fail "allocated party not listed"
+              caeOut <- readProcess damlHelper
+                  [ "ledger", "submit", "create-and-exercise", "#submit-test:Submit:Counter"
+                  , "--create-arg", "owner=" <> alice, "--create-arg", "count=42"
+                  , "--choice", "Reset"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", alice, "--dar", submitDar, "--json"
+                  ] ""
+              updateId <- case parseUpdateId caeOut of
+                  Just u -> pure u
+                  Nothing -> assertFailure "no updateId from create-and-exercise"
+              showOut <- readProcess damlHelper
+                  [ "ledger", "update", "show", updateId
+                  , "--party", alice
+                  , "--host=localhost", "--port", show sandboxPort, "--json"
+                  ] ""
+              -- create + exercise + the newly-created Counter (Reset = consuming + create)
+              -- → at least 2 events in ACS_DELTA view; LEDGER_EFFECTS sees 3
+              ("\"exercised\"" `isInfixOf` showOut) @?
+                  ("create-and-exercise output is missing exercised event: " <> take 500 showOut)
+          , testCase "exercise-by-key rejects a keyless template" $ do
+              sandboxPort <- getSandboxPort
+              (exit, _, err) <-
+                readCreateProcessWithExitCode (proc damlHelper
+                  [ "ledger", "submit", "exercise-by-key", "#submit-test:Submit:Counter"
+                  , "--key", "{}", "--choice", "Reset"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", "Alice", "--dar", submitDar
+                  ]) ""
+              exit == ExitFailure 1 @? "expected failure for keyless template"
+              ("template has no key" `isInfixOf` err) @?
+                  ("expected 'template has no key' in stderr, got: " <> err)
           ]
       , testGroup "update show"
           [ testCase "reports UPDATE_NOT_FOUND for an unknown update-id" $ do

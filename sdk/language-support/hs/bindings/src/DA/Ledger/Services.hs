@@ -7,3 +7,4 @@ import DA.Ledger.Services.PackageManagementService as X
 import DA.Ledger.Services.PartyManagementService as X
 import DA.Ledger.Services.PackageService as X
 import DA.Ledger.Services.UpdateService as X
+import DA.Ledger.Services.CommandService as X

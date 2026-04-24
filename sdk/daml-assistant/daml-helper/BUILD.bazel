@@ -36,6 +36,7 @@ da_haskell_library(
         "optparse-applicative",
         "process",
         "safe-exceptions",
+        "scientific",
         "semver",
         "text",
         "typed-process",
@@ -44,12 +45,14 @@ da_haskell_library(
         "uuid",
         "vector",
         "yaml",
+        "zip-archive",
         "aeson-pretty",
         "time",
     ],
     src_strip_prefix = "src",
     visibility = ["//visibility:public"],
     deps = [
+        "//compiler/daml-dar-reader",
         "//compiler/daml-lf-ast",
         "//compiler/daml-lf-proto",
         "//compiler/damlc/daml-compiler",
@@ -68,7 +71,9 @@ da_haskell_binary(
     name = "daml-helper",
     srcs = ["src/DA/Daml/Helper/Main.hs"],
     hackage_deps = [
+        "aeson",
         "base",
+        "bytestring",
         "extra",
         "filepath",
         "process",
@@ -174,10 +179,12 @@ da_haskell_test(
         "daml-helper",
         ":test.dar",
         ":test2.dar",
+        ":submit-test.dar",
         ":upgrade-test-v1.dar",
         ":upgrade-test-v2.dar",
     ] + (["@sysctl_nix//:bin/sysctl"] if is_darwin else []),
     hackage_deps = [
+        "aeson",
         "base",
         "bytestring",
         "extra",
@@ -187,6 +194,8 @@ da_haskell_test(
         "tasty",
         "tasty-hunit",
         "text",
+        "utf8-string",
+        "vector",
         "zip-archive",
     ],
     main_function = "DA.Daml.Helper.Test.Ledger.main",
@@ -245,6 +254,13 @@ daml_compile(
 daml_compile(
     name = "test2",
     srcs = glob(["test-data/Test.daml"]),
+)
+
+daml_compile(
+    name = "submit-test",
+    srcs = glob(["test-data/Submit.daml"]),
+    project_name = "submit-test",
+    version = "1.0.0",
 )
 
 daml_compile(

@@ -19,6 +19,12 @@ module DA.Daml.Helper.Ledger (
     runDeploy,
     runLedgerListParties,
     runLedgerUpdateShow,
+    runLedgerSubmitCreate,
+    runLedgerSubmitExercise,
+    runLedgerSubmitExerciseByKey,
+    runLedgerSubmitCreateAndExercise,
+    SubmitOpts(..),
+    SubmitCommandKind(..),
     runLedgerAllocateParties,
     runLedgerUploadDar,
     runLedgerUploadDar',
@@ -51,8 +57,10 @@ import Data.String (fromString)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
--- import qualified Data.UUID as UUID
--- import qualified Data.UUID.V4 as UUID
+import qualified Data.UUID as UUID
+import qualified Data.UUID.V4 as UUID
+import qualified Data.Vector as Vector
+import qualified Data.NameMap as NM
 import Network.GRPC.Unsafe.ChannelArgs (Arg(..))
 import Numeric.Natural
 import System.Exit
@@ -62,6 +70,8 @@ import System.Process.Typed
 
 -- import Com.Daml.Ledger.Api.V1.TransactionFilter
 import DA.Daml.Compiler.Dar (createArchive, createDarFile)
+import DA.Daml.Helper.LfJson (TemplateRef, ArgsInput(..), ResolvedTemplate(..))
+import qualified DA.Daml.Helper.LfJson as LfJson
 import DA.Daml.Helper.Util
 import qualified DA.Daml.LF.Ast as LF
 import qualified DA.Daml.LF.Ast.Optics as LF (packageRefs)
@@ -70,6 +80,11 @@ import DA.Daml.Project.Util (fromMaybeM)
 import qualified DA.Ledger as L
 import qualified DA.Service.Logger as Logger
 import qualified DA.Service.Logger.Impl.IO as Logger
+
+import qualified Com.Daml.Ledger.Api.V2.Commands as CP
+import qualified Com.Daml.Ledger.Api.V2.CommandService as CSP
+import qualified Com.Daml.Ledger.Api.V2.Transaction as TxP
+import qualified Com.Daml.Ledger.Api.V2.Value as VP
 
 import SdkVersion.Class (SdkVersioned, unresolvedBuiltinSdkVersion)
 
@@ -262,6 +277,194 @@ runLedgerUpdateShow flags updateId parties (JsonFlag json) = do
     if json
         then TL.putStrLn $ encodeToLazyText $ A.toJSON response
         else print response
+
+--------------------------------------------------------------------------------
+-- `daml ledger submit` family
+--------------------------------------------------------------------------------
+
+-- | What kind of `Command` this invocation builds. The argument payloads are
+-- still 'ArgsInput' at this point; they get schema-translated inside the
+-- handler once we know the template's type.
+data SubmitCommandKind
+    = SubmitCreate            { scArgs  :: ArgsInput }
+    | SubmitExercise          { seCid   :: String, seChoice :: String, seArgs :: ArgsInput }
+    | SubmitExerciseByKey     { sebkKey :: ArgsInput, sebkChoice :: String, sebkArgs :: ArgsInput }
+    | SubmitCreateAndExercise { scaeCreate :: ArgsInput, scaeChoice :: String, scaeArgs :: ArgsInput }
+
+data SubmitOpts = SubmitOpts
+    { soFlags     :: LedgerFlags
+    , soTemplate  :: TemplateRef
+    , soKind      :: SubmitCommandKind
+    , soActAs     :: [String]
+    , soReadAs    :: [String]
+    , soUserId    :: Maybe String
+    , soCommandId :: Maybe String
+    , soDarPath   :: Maybe FilePath
+    , soJson      :: JsonFlag
+    }
+
+runLedgerSubmitCreate           :: SubmitOpts -> IO ()
+runLedgerSubmitCreate           = runSubmit
+runLedgerSubmitExercise         :: SubmitOpts -> IO ()
+runLedgerSubmitExercise         = runSubmit
+runLedgerSubmitExerciseByKey    :: SubmitOpts -> IO ()
+runLedgerSubmitExerciseByKey    = runSubmit
+runLedgerSubmitCreateAndExercise :: SubmitOpts -> IO ()
+runLedgerSubmitCreateAndExercise = runSubmit
+
+runSubmit :: SubmitOpts -> IO ()
+runSubmit SubmitOpts{..} = do
+    let JsonFlag jsonOut = soJson
+    args <- getDefaultArgs soFlags
+    -- 1. Build a World from either a local DAR or the ledger's PackageService.
+    (world, _primaryPid) <- case soDarPath of
+        Just path -> do
+            unless jsonOut . putStrLn $ "Loading schema from DAR " <> path
+            LfJson.resolveFromDar path
+        Nothing -> do
+            unless jsonOut . putStrLn $ "Loading schema from " <> showHostAndPort args
+            buildWorldFromLedger args
+    -- 2. Resolve the template ref against that world.
+    resolved <- either fail pure (LfJson.resolveTemplateRef world soTemplate)
+    -- 3. Build the proto Command variant.
+    cmd <- either fail pure (buildCommand resolved soKind soTemplate)
+    -- 4. Package up Commands { user-id, command-id, act-as, read-as, commands = [cmd] }.
+    cmdId <- maybe (UUID.toString <$> UUID.nextRandom) pure soCommandId
+    let userId = fromMaybe ("daml-helper-" <> cmdId) soUserId
+    let commands = CP.Commands
+            { CP.commandsWorkflowId = ""
+            , CP.commandsUserId = TL.pack userId
+            , CP.commandsCommandId = TL.pack cmdId
+            , CP.commandsCommands = Vector.singleton cmd
+            , CP.commandsDeduplicationPeriod = Nothing
+            , CP.commandsMinLedgerTimeAbs = Nothing
+            , CP.commandsMinLedgerTimeRel = Nothing
+            , CP.commandsActAs = Vector.fromList (map TL.pack soActAs)
+            , CP.commandsReadAs = Vector.fromList (map TL.pack soReadAs)
+            , CP.commandsSubmissionId = ""
+            , CP.commandsDisclosedContracts = Vector.empty
+            , CP.commandsSynchronizerId = ""
+            , CP.commandsPackageIdSelectionPreference = Vector.empty
+            , CP.commandsPrefetchContractKeys = Vector.empty
+            , CP.commandsTapsMaxPasses = 0
+            }
+    unless jsonOut . putStrLn $ "Submitting command " <> cmdId <> " to " <> showHostAndPort args
+    -- 5. Submit and decode the returned transaction.
+    resp <- runWithLedgerArgs args $ L.submitAndWaitForTransaction commands
+    case CSP.submitAndWaitForTransactionResponseTransaction resp of
+        Nothing -> fail "server did not return a transaction"
+        Just tx -> printOutcome jsonOut tx
+
+-- | Turn a resolved template + kind into the proto `Command` variant.
+buildCommand
+    :: ResolvedTemplate
+    -> SubmitCommandKind
+    -> TemplateRef                -- ^ original ref, passed through verbatim to templateId
+    -> Either String CP.Command
+buildCommand rt kind ref = do
+    let tplId = Just (LfJson.templateRefToIdentifier ref)
+    case kind of
+        SubmitCreate argsIn -> do
+            rec_ <- encodeCreateArgs rt argsIn
+            pure $ wrap $ CP.CommandCommandCreate CP.CreateCommand
+                { CP.createCommandTemplateId = tplId
+                , CP.createCommandCreateArguments = Just rec_
+                }
+        SubmitExercise cid choice argsIn -> do
+            val <- encodeChoiceArgs rt (T.pack choice) argsIn
+            pure $ wrap $ CP.CommandCommandExercise CP.ExerciseCommand
+                { CP.exerciseCommandTemplateId = tplId
+                , CP.exerciseCommandContractId = TL.pack cid
+                , CP.exerciseCommandChoice = TL.pack choice
+                , CP.exerciseCommandChoiceArgument = Just val
+                }
+        SubmitExerciseByKey keyIn choice argsIn -> do
+            keyV <- encodeKeyArgs rt keyIn
+            val <- encodeChoiceArgs rt (T.pack choice) argsIn
+            pure $ wrap $ CP.CommandCommandExerciseByKey CP.ExerciseByKeyCommand
+                { CP.exerciseByKeyCommandTemplateId = tplId
+                , CP.exerciseByKeyCommandContractKey = Just keyV
+                , CP.exerciseByKeyCommandChoice = TL.pack choice
+                , CP.exerciseByKeyCommandChoiceArgument = Just val
+                }
+        SubmitCreateAndExercise createIn choice argsIn -> do
+            rec_ <- encodeCreateArgs rt createIn
+            val <- encodeChoiceArgs rt (T.pack choice) argsIn
+            pure $ wrap $ CP.CommandCommandCreateAndExercise CP.CreateAndExerciseCommand
+                { CP.createAndExerciseCommandTemplateId = tplId
+                , CP.createAndExerciseCommandCreateArguments = Just rec_
+                , CP.createAndExerciseCommandChoice = TL.pack choice
+                , CP.createAndExerciseCommandChoiceArgument = Just val
+                }
+  where
+    wrap x = CP.Command (Just x)
+
+encodeCreateArgs :: ResolvedTemplate -> ArgsInput -> Either String VP.Record
+encodeCreateArgs rt argsIn = do
+    j <- LfJson.encodeArgsInput (rtFields rt) argsIn
+    LfJson.buildCreateRecord rt j
+
+encodeChoiceArgs :: ResolvedTemplate -> T.Text -> ArgsInput -> Either String VP.Value
+encodeChoiceArgs rt chName argsIn = do
+    ch <- case NM.lookup (LF.ChoiceName chName) (LF.tplChoices (rtTemplate rt)) of
+        Just c -> Right c
+        Nothing -> Left $ "template has no choice named '" <> T.unpack chName <> "'"
+    let (_, argTy) = LF.chcArgBinder ch
+    -- For the k=v sugar we need a record-field view of the choice argument type.
+    -- If the choice takes a record, we can look up its fields; otherwise pairs
+    -- are rejected by encodeArgsInput with a schema-mismatch error.
+    let fieldsForSugar = case argTy of
+            LF.TCon qt ->
+              case LF.lookupDataType qt (rtWorld rt) of
+                Right dt | LF.DataRecord fs <- LF.dataCons dt -> fs
+                _ -> []
+            _ -> []
+    j <- LfJson.encodeArgsInput fieldsForSugar argsIn
+    LfJson.parseValueAsType (rtWorld rt) argTy j
+
+encodeKeyArgs :: ResolvedTemplate -> ArgsInput -> Either String VP.Value
+encodeKeyArgs rt argsIn = case rtKeyType rt of
+    Nothing -> Left "template has no key — cannot submit exercise-by-key"
+    Just kt -> do
+        let fieldsForSugar = case kt of
+                LF.TCon qt ->
+                  case LF.lookupDataType qt (rtWorld rt) of
+                    Right dt | LF.DataRecord fs <- LF.dataCons dt -> fs
+                    _ -> []
+                _ -> []
+        j <- LfJson.encodeArgsInput fieldsForSugar argsIn
+        LfJson.parseValueAsType (rtWorld rt) kt j
+
+-- | Pretty-print the transaction's update-id (text) or the full transaction (json).
+printOutcome :: Bool -> TxP.Transaction -> IO ()
+printOutcome jsonOut tx
+    | jsonOut   = TL.putStrLn $ encodeToLazyText $ A.object
+        [ "updateId"          .= TxP.transactionUpdateId tx
+        , "completionOffset"  .= TxP.transactionOffset tx
+        , "transaction"       .= A.toJSON tx
+        ]
+    | otherwise = do
+        putStrLn $ "updateId=" <> TL.unpack (TxP.transactionUpdateId tx)
+        putStrLn $ "completionOffset=" <> show (TxP.transactionOffset tx)
+
+-- | Build a full LF.World from the ledger by downloading every vetted package.
+buildWorldFromLedger :: LedgerArgs -> IO (LF.World, LF.PackageId)
+buildWorldFromLedger args = do
+    pkgIds <- runWithLedgerArgs args $ do
+        xs <- L.listPackages
+        pure [LF.PackageId (TL.toStrict (L.unPackageId p)) | p <- xs]
+    case pkgIds of
+        [] -> fail "no packages vetted on this participant"
+        rootIds -> do
+            m <- downloadAllReachablePackages (downloadPackage args) rootIds []
+            let pairs = [ (pid, pkg) | (pid, Just pkg) <- Map.toList m ]
+                externals = [ LF.ExternalPackage pid pkg | (pid, pkg) <- pairs ]
+                -- Arbitrarily pick the first as "self" to satisfy initWorldSelf; package-id
+                -- references resolve through the imported-set, so which one is "self"
+                -- doesn't affect template lookup.
+                primary = fst (head pairs)
+                primaryPkg = snd (head pairs)
+            pure (LF.initWorldSelf externals primaryPkg, primary)
 
 -- | Fetch the packages reachable from a main package-id, and reconstruct a DAR file.
 runLedgerFetchDar :: SdkVersioned => LedgerFlags -> String -> FilePath -> IO ()

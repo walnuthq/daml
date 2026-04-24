@@ -101,6 +101,10 @@ genrule(
         "Com/Daml/Ledger/Api/V2/Value.hs",
         "Com/Daml/Ledger/Api/V2/TraceContext.hs",
         "Com/Daml/Ledger/Api/V2/OffsetCheckpoint.hs",
+        "Com/Daml/Ledger/Api/V2/CommandService.hs",
+        "Com/Daml/Ledger/Api/V2/Commands.hs",
+        "Com/Daml/Ledger/Api/V2/Completion.hs",
+        "Com/Daml/Ledger/Api/V2/ReassignmentCommands.hs",
     ],
     cmd = """
         for src in $(locations :ledger-api-protos-fg); do
