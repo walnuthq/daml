@@ -71,6 +71,8 @@ data Command
         , updateId :: String
         , parties :: [String]
         , json :: JsonFlag
+        , pretty :: PrettyFlag
+        , darPathM :: Maybe FilePath
         }
     | LedgerSubmitCmd { submitOpts :: SubmitOpts }
     | LedgerAllocateParties { flags :: LedgerFlags, parties :: [String] }
@@ -352,6 +354,10 @@ commandParser = subparser $ fold
         <*> some (strOption (long "party" <> metavar "PARTY"
             <> help "Requesting party (repeat for multi-party projection)"))
         <*> fmap JsonFlag (switch $ long "json" <> help "Output update as JSON")
+        <*> fmap PrettyFlag (switch $ long "pretty"
+            <> help "Render a Foundry-style colored call tree (mutex with --json)")
+        <*> optional (strOption (long "dar" <> metavar "PATH"
+            <> help "Schema DAR for template-name resolution in --pretty (optional)"))
 
     ----------------------------------------------------------------------------
     -- submit {create,exercise,exercise-by-key,create-and-exercise}
@@ -677,7 +683,7 @@ runCommand = \case
         runStart startOptions
     Deploy {..} -> runDeploy flags
     LedgerListParties {..} -> runLedgerListParties flags json
-    LedgerUpdateShow {..} -> runLedgerUpdateShow flags updateId parties json
+    LedgerUpdateShow {..} -> runLedgerUpdateShow flags updateId parties json pretty darPathM
     LedgerSubmitCmd {..} -> case soKind submitOpts of
         SubmitCreate{}            -> runLedgerSubmitCreate            submitOpts
         SubmitExercise{}          -> runLedgerSubmitExercise          submitOpts

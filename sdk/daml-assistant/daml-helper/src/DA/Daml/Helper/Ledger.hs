@@ -15,6 +15,7 @@ module DA.Daml.Helper.Ledger (
     L.ClientSSLKeyCertPair(..),
     L.TimeoutSeconds,
     JsonFlag(..),
+    PrettyFlag(..),
     DryRun(..),
     runDeploy,
     runLedgerListParties,
@@ -55,8 +56,10 @@ import qualified Data.Set as Set
 import Data.Maybe
 import Data.String (fromString)
 import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
+import qualified System.IO
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
 import qualified Data.Vector as Vector
@@ -72,6 +75,7 @@ import System.Process.Typed
 import DA.Daml.Compiler.Dar (createArchive, createDarFile)
 import DA.Daml.Helper.LfJson (TemplateRef, ArgsInput(..), ResolvedTemplate(..))
 import qualified DA.Daml.Helper.LfJson as LfJson
+import qualified DA.Daml.Helper.UpdatePretty as UpdatePretty
 import DA.Daml.Helper.Util
 import qualified DA.Daml.LF.Ast as LF
 import qualified DA.Daml.LF.Ast.Optics as LF (packageRefs)
@@ -245,6 +249,7 @@ uploadDarFile args (DryRun dryRun) bytes =
   runWithLedgerArgs args $ if dryRun then L.validateDarFile bytes else L.uploadDarFile bytes
 
 newtype JsonFlag = JsonFlag { unJsonFlag :: Bool }
+newtype PrettyFlag = PrettyFlag { unPrettyFlag :: Bool }
 newtype DryRun = DryRun { unDryRun :: Bool}
 
 -- | Fetch list of parties from ledger.
@@ -267,16 +272,39 @@ runLedgerListParties flags (JsonFlag json) = do
         mapM_ print xs
 
 -- | Fetch a single update (transaction) by its update-id and print it.
-runLedgerUpdateShow :: LedgerFlags -> String -> [String] -> JsonFlag -> IO ()
-runLedgerUpdateShow flags updateId parties (JsonFlag json) = do
+--
+-- Three output modes:
+--
+-- * @--json@       — the raw decoded proto, as JSON (machine-readable).
+-- * @--pretty@     — a Foundry-style colored call tree (human-readable).
+-- * neither        — Haskell 'Show' of the proto response (debug default).
+--
+-- When @--pretty@ is combined with @--dar@ (or a reachable ledger), template
+-- ids are resolved against the supplied Daml-LF schema; otherwise only the
+-- module\/entity names from the wire are shown.
+runLedgerUpdateShow
+    :: LedgerFlags
+    -> String                -- ^ update-id
+    -> [String]              -- ^ requesting parties
+    -> JsonFlag
+    -> PrettyFlag
+    -> Maybe FilePath        -- ^ optional DAR for template-name resolution
+    -> IO ()
+runLedgerUpdateShow flags updateId parties (JsonFlag json) (PrettyFlag pretty) darPathM = do
+    when (json && pretty) $ fail "--pretty and --json are mutually exclusive"
     args <- getDefaultArgs flags
-    unless json . putStrLn $
+    let quiet = json || pretty
+    unless quiet . putStrLn $
         "Fetching update " <> updateId <> " from " <> showHostAndPort args
     response <- runWithLedgerArgs args $
         L.getUpdateById (TL.pack updateId) (map (L.Party . TL.pack) parties)
-    if json
-        then TL.putStrLn $ encodeToLazyText $ A.toJSON response
-        else print response
+    case (pretty, json) of
+        (True, _) -> do
+            world <- traverse (fmap fst . LfJson.resolveFromDar) darPathM
+            uc <- UpdatePretty.detectColor System.IO.stdout
+            T.putStr (UpdatePretty.prettyUpdateResponse uc world response)
+        (_, True) -> TL.putStrLn $ encodeToLazyText $ A.toJSON response
+        _         -> print response
 
 --------------------------------------------------------------------------------
 -- `daml ledger submit` family

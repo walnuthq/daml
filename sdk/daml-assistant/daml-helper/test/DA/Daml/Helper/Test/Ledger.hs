@@ -379,6 +379,54 @@ main = do
               ("template has no key" `isInfixOf` err) @?
                   ("expected 'template has no key' in stderr, got: " <> err)
           ]
+      , testGroup "update show --pretty"
+          [ testCase "renders a create event as a Foundry-style tree" $ do
+              sandboxPort <- getSandboxPort
+              callCommand $ unwords
+                [ damlHelper, "ledger", "allocate-party"
+                , "--host=localhost", "--port", show sandboxPort, "--timeout=120"
+                , "PrettyTestAlice"
+                ]
+              out <- readProcess damlHelper
+                  (words "ledger list-parties --json --host=localhost --port" <> [show sandboxPort]) ""
+              alice <- case partyByPrefix "PrettyTestAlice::" out of
+                  Just p -> pure p
+                  Nothing -> fail "allocated party not listed"
+              callCommand $ unwords
+                [ damlHelper, "ledger", "upload-dar"
+                , "--host=localhost", "--port", show sandboxPort, submitDar
+                ]
+              createOut <- readProcess damlHelper
+                  [ "ledger", "submit", "create", "#submit-test:Submit:Counter"
+                  , "--arg", "owner=" <> alice, "--arg", "count=0"
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--act-as", alice, "--dar", submitDar, "--json"
+                  ] ""
+              updateId <- case parseUpdateId createOut of
+                  Just u -> pure u
+                  Nothing -> assertFailure "no updateId from create"
+              prettyOut <- readProcess damlHelper
+                  [ "ledger", "update", "show", updateId
+                  , "--party", alice
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--pretty", "--dar", submitDar
+                  ] ""
+              -- Output should mention: the CREATE marker, the template name, and
+              -- the owner party. The exact escape codes depend on TTY detection.
+              ("CREATE" `isInfixOf` prettyOut) @? ("expected CREATE in output, got:\n" <> prettyOut)
+              ("Submit:Counter" `isInfixOf` prettyOut) @? ("expected template name, got:\n" <> prettyOut)
+              ("PrettyTestAlice" `isInfixOf` prettyOut) @? ("expected party name, got:\n" <> prettyOut)
+          , testCase "--pretty and --json are mutually exclusive" $ do
+              sandboxPort <- getSandboxPort
+              (exit, _, err) <- readCreateProcessWithExitCode (proc damlHelper
+                  [ "ledger", "update", "show", "1220" <> replicate 64 'a'
+                  , "--host=localhost", "--port", show sandboxPort
+                  , "--party", "SomeParty", "--pretty", "--json"
+                  ]) ""
+              exit == ExitFailure 1 @? "expected failure"
+              ("mutually exclusive" `isInfixOf` err) @?
+                ("expected mutex error, got: " <> err)
+          ]
       , testGroup "update show"
           [ testCase "reports UPDATE_NOT_FOUND for an unknown update-id" $ do
               sandboxPort <- getSandboxPort
