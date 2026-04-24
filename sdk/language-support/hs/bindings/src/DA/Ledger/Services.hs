@@ -6,3 +6,4 @@ module DA.Ledger.Services (module X) where
 import DA.Ledger.Services.PackageManagementService as X
 import DA.Ledger.Services.PartyManagementService as X
 import DA.Ledger.Services.PackageService as X
+import DA.Ledger.Services.UpdateService as X

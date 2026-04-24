@@ -18,6 +18,7 @@ module DA.Daml.Helper.Ledger (
     DryRun(..),
     runDeploy,
     runLedgerListParties,
+    runLedgerUpdateShow,
     runLedgerAllocateParties,
     runLedgerUploadDar,
     runLedgerUploadDar',
@@ -249,6 +250,18 @@ runLedgerListParties flags (JsonFlag json) = do
         putStrLn "no parties are known"
     else
         mapM_ print xs
+
+-- | Fetch a single update (transaction) by its update-id and print it.
+runLedgerUpdateShow :: LedgerFlags -> String -> [String] -> JsonFlag -> IO ()
+runLedgerUpdateShow flags updateId parties (JsonFlag json) = do
+    args <- getDefaultArgs flags
+    unless json . putStrLn $
+        "Fetching update " <> updateId <> " from " <> showHostAndPort args
+    response <- runWithLedgerArgs args $
+        L.getUpdateById (TL.pack updateId) (map (L.Party . TL.pack) parties)
+    if json
+        then TL.putStrLn $ encodeToLazyText $ A.toJSON response
+        else print response
 
 -- | Fetch the packages reachable from a main package-id, and reconstruct a DAR file.
 runLedgerFetchDar :: SdkVersioned => LedgerFlags -> String -> FilePath -> IO ()

@@ -63,6 +63,12 @@ data Command
         }
     | Deploy { flags :: LedgerFlags }
     | LedgerListParties { flags :: LedgerFlags, json :: JsonFlag }
+    | LedgerUpdateShow
+        { flags :: LedgerFlags
+        , updateId :: String
+        , parties :: [String]
+        , json :: JsonFlag
+        }
     | LedgerAllocateParties { flags :: LedgerFlags, parties :: [String] }
     | LedgerUploadDar { flags :: LedgerFlags, dryRun :: DryRun, darPathM :: Maybe FilePath }
     | LedgerFetchDar { flags :: LedgerFlags, pid :: String, saveAs :: FilePath }
@@ -275,6 +281,12 @@ commandParser = subparser $ fold
             , command "fetch-dar" $ info
                 (ledgerFetchDarCmd <**> helper)
                 (progDesc "Fetch DAR from ledger into file")
+            , command "update" $ info
+                (subparser (command "show" $ info
+                    (ledgerUpdateShowCmd <**> helper)
+                    (progDesc "Fetch a single update (transaction) by its update-id"))
+                 <**> helper)
+                (progDesc "Inspect updates (transactions) on the ledger")
             ]
         , subparser $ internal <> fold -- hidden subcommands
             [ command "allocate-party" $ info
@@ -313,6 +325,13 @@ commandParser = subparser $ fold
     ledgerListPartiesCmd = LedgerListParties
         <$> ledgerFlags
         <*> fmap JsonFlag (switch $ long "json" <> help "Output party list in JSON")
+
+    ledgerUpdateShowCmd = LedgerUpdateShow
+        <$> ledgerFlags
+        <*> argument str (metavar "UPDATE_ID" <> help "Update-id (a.k.a. transaction-id) to fetch")
+        <*> some (strOption (long "party" <> metavar "PARTY"
+            <> help "Requesting party (repeat for multi-party projection)"))
+        <*> fmap JsonFlag (switch $ long "json" <> help "Output update as JSON")
 
     packagesListCmd = PackagesList
         <$> ledgerFlags
@@ -521,6 +540,7 @@ runCommand = \case
         runStart startOptions
     Deploy {..} -> runDeploy flags
     LedgerListParties {..} -> runLedgerListParties flags json
+    LedgerUpdateShow {..} -> runLedgerUpdateShow flags updateId parties json
     PackagesList {..} -> runLedgerListPackages0 flags
     LedgerAllocateParties {..} -> runLedgerAllocateParties flags parties
     LedgerUploadDar {..} -> runLedgerUploadDar flags dryRun darPathM

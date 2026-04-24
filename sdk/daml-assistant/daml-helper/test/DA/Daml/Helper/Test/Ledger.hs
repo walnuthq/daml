@@ -14,6 +14,7 @@ import DA.Ledger.Services.PartyManagementService (PartyDetails(..))
 import DA.Ledger.Types (Party(..))
 import DA.Test.Sandbox
 import qualified Data.ByteString.Lazy as BSL
+import Data.List (isInfixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import System.Environment.Blank
@@ -209,6 +210,46 @@ main = do
               -- assertBool "Error message did not contain expected DAR_NOT_VALID_UPGRADE" ("DAR_NOT_VALID_UPGRADE" `L.isInfixOf` out)
               -- assertBool "Error message did not contain expected reason" $
               --   "Reason: The upgraded data type T has added new fields, but those fields are not Optional." `L.isInfixOf` out
+          ]
+      , testGroup "update show"
+          [ testCase "reports UPDATE_NOT_FOUND for an unknown update-id" $ do
+              sandboxPort <- getSandboxPort
+              -- Allocate a requesting party so the filter is well-formed.
+              callCommand $
+                unwords
+                  [ damlHelper
+                  , "ledger"
+                  , "allocate-party"
+                  , "--host=localhost"
+                  , "--port"
+                  , show sandboxPort
+                  , "--timeout=120"
+                  , "UpdateShowTestParty"
+                  ]
+              -- A syntactically-valid but unallocated update-id: canton update-ids are
+              -- multihash-prefixed (0x1220 for SHA-256) followed by 32 bytes of hash.
+              let fakeUpdateId = "1220" <> replicate 64 'a'
+              (exitCode, _, err) <-
+                readCreateProcessWithExitCode
+                  (shell $
+                    unwords
+                      [ damlHelper
+                      , "ledger"
+                      , "update"
+                      , "show"
+                      , fakeUpdateId
+                      , "--host=localhost"
+                      , "--port"
+                      , show sandboxPort
+                      , "--party"
+                      , "UpdateShowTestParty"
+                      , "--json"
+                      ])
+                  ""
+              exitCode == ExitFailure 1 @?
+                ("update show with unknown id should fail but got " <> show exitCode)
+              ("UPDATE_NOT_FOUND" `isInfixOf` err) @?
+                ("expected UPDATE_NOT_FOUND in stderr, got: " <> err)
           ]
       , testGroup "fetch-dar limited gRPC message size"
           [ testCase "fails if the message size is too low" $ do

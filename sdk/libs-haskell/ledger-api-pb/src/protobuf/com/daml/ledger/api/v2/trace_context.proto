@@ -1,0 +1,25 @@
+// Copyright (c) 2026 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// **** IMPORTANT NOTICE ****
+// This is a snapshot of the ledger-api proto file as of 2026-04-23, vendored
+// to support the `daml ledger update show` CLI. Do not use these proto
+// definitions for any other purpose.
+
+syntax = "proto3";
+
+package com.daml.ledger.api.v2;
+
+option csharp_namespace = "Com.Daml.Ledger.Api.V2";
+option java_outer_classname = "TraceContextOuterClass";
+option java_package = "com.daml.ledger.api.v2";
+
+message TraceContext {
+  // https://www.w3.org/TR/trace-context/
+  //
+  // Optional
+  string traceparent = 1;
+
+  // Optional
+  string tracestate = 2;
+}
