@@ -235,6 +235,10 @@ data ModuleContents = ModuleContents
 data ChoiceData = ChoiceData
   { _choiceDatTy :: GHC.Type
   , _choiceDatExpr :: GHC.Expr GHC.CoreBndr
+  , _choiceDatLoc :: Maybe LF.SourceLoc
+    -- ^ Source location of the choice declaration, taken from the desugared
+    -- @_choice$_@ binder. Carried into 'chcLocation' so that debug tooling
+    -- can map choices back to source.
   }
 
 extractModuleContents :: Env -> CoreModule -> ModIface -> ModDetails -> ModuleContents
@@ -254,7 +258,7 @@ extractModuleContents env@Env{..} coreModule modIface details = do
     mcInterfaceBinds = scrapeInterfaceBinds envLfVersion mcTypeDefs mcBinds
     mcInterfaceInstanceBinds = scrapeInterfaceInstanceBinds env mcBinds
     mcChoiceData = MS.fromListWith (++)
-        [ (mkTypeCon [getOccText tplTy], [ChoiceData ty v])
+        [ (mkTypeCon [getOccText tplTy], [ChoiceData ty v (convNameLoc name)])
         | (name, v) <- mcBinds
         , "_choice$_" `T.isPrefixOf` getOccText name
         , ty@(TypeCon _
@@ -1303,7 +1307,7 @@ convertChoices env mc tplTypeCon tbinds =
         (MS.findWithDefault [] tplTypeCon (mcChoiceData mc))
 
 convertChoice :: SdkVersioned => Env -> TemplateBinds -> ChoiceData -> ConvertM TemplateChoice
-convertChoice env tbinds (ChoiceData ty expr) = do
+convertChoice env tbinds (ChoiceData ty expr mbLoc) = do
     -- The desuaged representation of a Daml Choice is a five tuple.
     -- Constructed by mkChoiceDecls in RdrHsSyn.hs in the ghc repo.
     -- We match against that 5-tuple expression or type in 3 places in this file.
@@ -1318,12 +1322,21 @@ convertChoice env tbinds (ChoiceData ty expr) = do
 
     let choiceName = ChoiceName (T.intercalate "." $ unTypeConName $ qualObject choiceTyCon)
 
+    convertedExpr <- convertExpr env expr
     ERecCon _ [ _consum
               , (_, controllers)
               , (_, optObservers)
               , (_, optAuthorizers)
-              , (_, action) -- choiceTupleExpr
-              ] <- removeLocations <$> convertExpr env expr
+              , (_, strippedAction) -- choiceTupleExpr
+              ] <- pure $ removeLocations convertedExpr
+
+    -- The structural matches above (and on the observers/authorizers below)
+    -- need the location-free form, but the choice body keeps its source
+    -- locations: they drive runtime stack traces and source-level debug
+    -- tooling, and are evaluation-transparent otherwise.
+    let action = case peelLocations convertedExpr of
+          ERecCon _ [_, _, _, _, (_, actionExpr)] -> actionExpr
+          _ -> strippedAction
 
     mbObservers <-
       case optObservers of
@@ -1356,7 +1369,7 @@ convertChoice env tbinds (ChoiceData ty expr) = do
         PostConsuming | otherwise ->
           unsupportedOperation "Postconsuming choice for interface." ()
     pure TemplateChoice
-        { chcLocation = Nothing
+        { chcLocation = mbLoc
         , chcName = choiceName
         , chcConsuming = consuming == Consuming
         , chcControllers = applyThisAndArg controllers
@@ -1369,6 +1382,10 @@ convertChoice env tbinds (ChoiceData ty expr) = do
         }
       where
         applyThisAndArg func = func `ETmApp` EVar this `ETmApp` EVar arg
+
+        peelLocations :: LF.Expr -> LF.Expr
+        peelLocations (ELocation _ e) = peelLocations e
+        peelLocations e = e
 
 convertBinds :: SdkVersioned => Env -> ModuleContents -> ConvertM [Definition]
 convertBinds env mc =
