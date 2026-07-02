@@ -14,14 +14,12 @@
 module DA.Cli.Damlc (main, Command (..), MultiPackageManifestEntry (..), fullParseArgs) where
 
 import qualified "zip-archive" Codec.Archive.Zip as ZipArchive
-import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, bracket, catch, displayException, throwIO, handle, throw)
+import Control.Exception (bracket, catch, displayException, throwIO, handle, throw)
 import Control.Exception.Safe (catchIO)
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Extra (allM, mapMaybeM, whenM, whenJust)
 import Control.Monad.Trans.Cont (ContT (..), evalContT)
-import Control.Monad.Trans.Maybe (runMaybeT)
 import qualified Crypto.Hash as Hash
 import DA.Bazel.Runfiles (setRunfilesEnv)
 import qualified DA.Cli.Args as ParseArgs
@@ -80,13 +78,12 @@ import DA.Cli.Damlc.Test (CoveragePaths(..),
                           getRunAllTests,
                           loadAggregatePrintResults,
                           CoverageFilter(..))
+import DA.Cli.Damlc.DebugInfo (writeDamlDebugInfo)
 import DA.Daml.Compiler.Dar (FromDalf(..),
                              buildDar,
                              createDarFile,
                              damlFilesInDir,
-                             getDamlFiles,
                              getDamlRootFiles,
-                             getSrcRoot,
                              writeIfacesAndHie)
 import DA.Daml.Compiler.Output (diagnosticsLogger, writeOutput, writeOutputBSL)
 import DA.Daml.Project.Types
@@ -173,7 +170,7 @@ import qualified DA.Service.Logger.Impl.GCP as Logger.GCP
 import qualified DA.Service.Logger.Impl.IO as Logger.IO
 import DA.Signals (installSignalHandlers)
 import qualified Com.Digitalasset.Daml.Lf.Archive.DamlLf as PLF
-import Data.Aeson (FromJSON, ToJSON, (.=), object)
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson.Encode.Pretty as Aeson.Pretty
 import qualified Data.Aeson.Text as Aeson
 import Data.Bifunctor (bimap, second)
@@ -181,11 +178,10 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import qualified Data.ByteString.UTF8 as BSUTF8
-import Data.Char (isAlphaNum, isSpace)
 import Data.Either (partitionEithers)
 import Data.FileEmbed (embedFile)
 import qualified Data.HashSet as HashSet
-import Data.List (foldl', isPrefixOf, isInfixOf, stripPrefix)
+import Data.List (isPrefixOf, isInfixOf)
 import Data.List.Extra (elemIndices, nubOrd, nubSort)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
@@ -204,7 +200,7 @@ import Development.IDE.Core.IdeState.Daml (getDamlIdeState,
                                            toIdeLogger,
                                            scriptServiceJarFromOptions)
 import Development.IDE.Core.Rules (transitiveModuleDeps)
-import Development.IDE.Core.Rules.Daml (SpansInfo, getDlintIdeas, getSpanInfo)
+import Development.IDE.Core.Rules.Daml (getDlintIdeas, getSpanInfo)
 import Development.IDE.Core.Shake (Config(..),
                                    IdeResult,
                                    NotificationHandler(..),
@@ -287,7 +283,7 @@ import Control.DeepSeq
 import Data.Binary
 import Data.Hashable
 import GHC.Generics (Generic)
-import Development.Shake (Action, Rules, RuleResult)
+import Development.Shake (Rules, RuleResult)
 import Development.Shake.Rule (RunChanged (ChangedRecomputeDiff, ChangedRecomputeSame))
 import qualified Development.IDE.Types.Logger as IDELogger
 
@@ -321,67 +317,6 @@ data Command = Command CommandName (Maybe PackageLocationOpts) (IO ())
 data DebugInfoFlag = DebugInfoFlag
   { getDebugInfoFlag :: Bool
   }
-
-data DamlDebugInfo = DamlDebugInfo
-  { ddiSchema :: !String
-  , ddiPackageId :: !String
-  , ddiPackageName :: !String
-  , ddiPackageVersion :: !String
-  , ddiSourceRoot :: !FilePath
-  , ddiFiles :: ![DamlDebugSourceFile]
-  }
-  deriving (Eq, Show)
-
-instance ToJSON DamlDebugInfo where
-  toJSON DamlDebugInfo{..} =
-    object
-      [ "schema" .= ddiSchema
-      , "packageId" .= ddiPackageId
-      , "packageName" .= ddiPackageName
-      , "packageVersion" .= ddiPackageVersion
-      , "sourceRoot" .= ddiSourceRoot
-      , "files" .= ddiFiles
-      ]
-
-data DamlDebugSourceFile = DamlDebugSourceFile
-  { ddsfPath :: !FilePath
-  , ddsfHash :: !String
-  , ddsfEntities :: ![DamlDebugEntity]
-  , ddsfSpans :: !SpansInfo
-  }
-  deriving (Eq, Show)
-
-instance ToJSON DamlDebugSourceFile where
-  toJSON DamlDebugSourceFile{..} =
-    object
-      [ "path" .= ddsfPath
-      , "sha256" .= ddsfHash
-      , "entities" .= ddsfEntities
-      , "spans" .= ddsfSpans
-      ]
-
-data DamlDebugEntity = DamlDebugEntity
-  { ddeKind :: !String
-  , ddeName :: !String
-  , ddeQualifiedName :: !String
-  , ddeStartLine :: !Int
-  , ddeStartCol :: !Int
-  , ddeEndLine :: !Int
-  , ddeEndCol :: !Int
-  }
-  deriving (Eq, Show)
-
-instance ToJSON DamlDebugEntity where
-  toJSON DamlDebugEntity{..} =
-    object
-      [ "kind" .= ddeKind
-      , "name" .= ddeName
-      , "qualifiedName" .= ddeQualifiedName
-      , "startLine" .= ddeStartLine
-      , "startCol" .= ddeStartCol
-      , "endLine" .= ddeEndLine
-      , "endCol" .= ddeEndCol
-      ]
 
 cmdMultiIde :: SdkVersion.Class.SdkVersioned => Int -> Mod CommandFields Command
 cmdMultiIde _numProcessors =
@@ -1090,7 +1025,7 @@ buildEffect relativize pkgPath pkgConfig opts mbOutFile debugInfoFlag incrementa
       (dar, mPkgId) <- mbErr "ERROR: Creation of DAR file failed." mbDar
       createDarFile loggerH fp dar
       when (getDebugInfoFlag debugInfoFlag) $
-        writeDamlDebugInfo loggerH compilerH pkgConfig fp mPkgId
+        writeDamlDebugInfo loggerH compilerH pkgConfig fp
       pure mPkgId
     where
         targetFilePath rel name =
@@ -1102,122 +1037,6 @@ buildEffect relativize pkgPath pkgConfig opts mbOutFile debugInfoFlag incrementa
         syncUpgradesField pkgPath pkgConf opts = do
           opts <- updateUpgradePath "build" pkgPath opts (pUpgradeDar pkgConf)
           pure (pkgConf { pUpgradeDar = uiUpgradedPackagePath (optUpgradeInfo opts) }, opts)
-
-writeDamlDebugInfo
-  :: Logger.Handle IO
-  -> IDE.IdeState
-  -> PackageConfigFields
-  -> FilePath
-  -> Maybe LF.PackageId
-  -> IO ()
-writeDamlDebugInfo loggerH compilerH PackageConfigFields{..} darPath mPkgId = case pVersion of
-  Nothing ->
-    Logger.logInfo loggerH "Skipping debug-info sidecar because package version is missing."
-  Just packageVersion -> case pSrc of
-    "" ->
-      Logger.logInfo loggerH "Skipping debug-info sidecar because package source is empty."
-    _ -> do
-      let debugInfoPath = replaceExtension darPath "debug-info.json"
-      mbDebugInput <- runActionSync compilerH $ runMaybeT $ do
-        srcRoot <- getSrcRoot pSrc
-        files <- getDamlFiles pSrc
-        pure (srcRoot, files)
-      case mbDebugInput of
-        Nothing ->
-          Logger.logInfo loggerH "Skipping debug-info sidecar because source files could not be resolved."
-        Just (srcRoot, files) -> do
-          sourceRoot <- canonicalizePath $ fromNormalizedFilePath srcRoot
-          setFilesOfInterest compilerH (HashSet.fromList files)
-          debugFiles <- runActionSync compilerH $ forM files buildDebugSourceFile
-          let debugInfo = DamlDebugInfo
-                { ddiSchema = "daml-debug-info/v0"
-                , ddiPackageId = maybe "" (T.unpack . LF.unPackageId) mPkgId
-                , ddiPackageName = T.unpack $ LF.unPackageName pName
-                , ddiPackageVersion = T.unpack $ LF.unPackageVersion packageVersion
-                , ddiSourceRoot = sourceRoot
-                , ddiFiles = debugFiles
-                }
-              encodedDebugInfo = Aeson.Pretty.encodePretty debugInfo
-          createDirectoryIfMissing True $ takeDirectory debugInfoPath
-          BSL.writeFile debugInfoPath encodedDebugInfo
-          embedDamlDebugInfo darPath encodedDebugInfo
-          Logger.logInfo loggerH $ "Created " <> T.pack debugInfoPath
-          Logger.logInfo loggerH "Embedded META-INF/daml-debug-info.json in DAR."
-
-embedDamlDebugInfo :: FilePath -> BSL.ByteString -> IO ()
-embedDamlDebugInfo darPath encodedDebugInfo = go (10 :: Int)
-  where
-    go retries =
-      writeEntry `catch` handleRetry retries
-
-    handleRetry :: Int -> IOException -> IO ()
-    handleRetry retries e =
-      if retries > 0
-        then threadDelay 100000 >> go (retries - 1)
-        else throwIO e
-
-    writeEntry = do
-      -- Read the DAR strictly before rewriting the same path. A lazy read can
-      -- keep the file handle open long enough for the rewrite to fail on macOS.
-      archive <- ZipArchive.toArchive . BSL.fromStrict <$> B.readFile darPath
-      let entry = ZipArchive.toEntry "META-INF/daml-debug-info.json" 0 encodedDebugInfo
-      BSL.writeFile darPath $ ZipArchive.fromArchive $ ZipArchive.addEntryToArchive entry archive
-
-buildDebugSourceFile :: NormalizedFilePath -> Action DamlDebugSourceFile
-buildDebugSourceFile file = do
-  dflags <- hsc_dflags . hscEnv <$> use_ GhcSession file
-  spans <- getSpanInfo dflags file
-  let path = fromNormalizedFilePath file
-  bytes <- liftIO $ B.readFile path
-  sourceText <- liftIO $ readFile path
-  pure DamlDebugSourceFile
-    { ddsfPath = path
-    , ddsfHash = show (Hash.hash bytes :: Hash.Digest Hash.SHA256)
-    , ddsfEntities = extractDebugEntities sourceText
-    , ddsfSpans = spans
-    }
-
-extractDebugEntities :: String -> [DamlDebugEntity]
-extractDebugEntities sourceText =
-  let (_, _, entities) = foldl' step ("Main", Nothing, []) (zip [1..] $ lines sourceText)
-  in reverse entities
-  where
-    step (moduleName, currentTemplate, entities) (lineNo, line)
-      | Just moduleName' <- parseModuleDecl line =
-          (moduleName', currentTemplate, entities)
-      | Just (templateName, startCol, endCol) <- parseEntityDecl "template" line =
-          let qualifiedName = moduleName <> ":" <> templateName
-              entity = DamlDebugEntity "template" templateName qualifiedName lineNo startCol lineNo endCol
-          in (moduleName, Just templateName, entity : entities)
-      | Just templateName <- currentTemplate
-      , Just (choiceName, startCol, endCol) <- parseEntityDecl "choice" line =
-          let qualifiedName = moduleName <> ":" <> templateName <> "." <> choiceName
-              entity = DamlDebugEntity "choice" choiceName qualifiedName lineNo startCol lineNo endCol
-          in (moduleName, currentTemplate, entity : entities)
-      | otherwise =
-          (moduleName, currentTemplate, entities)
-
-    parseModuleDecl line = do
-      rest <- stripLeadingPrefix "module" line
-      let moduleName = takeWhile isDebugIdentChar $ dropWhile isSpace rest
-      if null moduleName then Nothing else Just moduleName
-
-    parseEntityDecl keyword line = do
-      rest <- stripLeadingPrefix keyword line
-      let nameStart = length line - length rest + length (takeWhile isSpace rest)
-          name = takeWhile isDebugIdentChar $ dropWhile isSpace rest
-      if null name
-        then Nothing
-        else Just (name, nameStart, nameStart + length name)
-
-    stripLeadingPrefix keyword line =
-      let stripped = dropWhile isSpace line
-      in case stripPrefix keyword stripped of
-          Just rest | not (null rest) && isSpace (head rest) -> Just rest
-          _ -> Nothing
-
-    isDebugIdentChar c =
-      isAlphaNum c || c == '_' || c == '\'' || c == '.'
 
 updateUpgradePath :: T.Text -> PackagePath -> Options -> Maybe FilePath -> IO Options
 updateUpgradePath context packagePath opts@Options{optUpgradeInfo} newPkgPath = do
