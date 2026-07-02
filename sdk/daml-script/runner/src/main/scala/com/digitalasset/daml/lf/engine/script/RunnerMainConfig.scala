@@ -37,6 +37,7 @@ case class RunnerMainConfig(
     uploadDar: Boolean,
     resultMode: RunnerMainConfig.ResultMode,
     ideLedgerProtocolVersion: IdeLedgerProtocolVersion,
+    debugTraceFile: Option[File],
 )
 
 object RunnerMainConfig {
@@ -109,6 +110,7 @@ private[script] case class RunnerMainConfigIntermediate(
     excludeScriptNames: List[String],
     ideLedgerProtocolVersion: Option[IdeLedgerProtocolVersion],
     listScriptsJsonFile: Option[File],
+    debugTraceFile: Option[File],
 ) {
 
   def getRunMode: Either[String, RunnerMainConfig.RunMode] =
@@ -177,6 +179,7 @@ private[script] case class RunnerMainConfigIntermediate(
         uploadDar = uploadDar,
         resultMode = resultMode,
         ideLedgerProtocolVersion = pv,
+        debugTraceFile = debugTraceFile,
       )
     } yield config
 
@@ -329,6 +332,13 @@ private[script] object RunnerMainConfigIntermediate {
         s"Protocol version for the IDE Ledger to imitate. Default ${IdeLedgerProtocolVersion.latest.toString}. Currently only affects ContractKey/rollback behaviour. Only available when using --ide-ledger"
       )
 
+    opt[File]("debug-trace-file")
+      .optional()
+      .action((f, c) => c.copy(debugTraceFile = Some(f)))
+      .text(
+        "EXPERIMENTAL: Write a JSONL debug trace of the script run (script questions, submissions, ledger events, trace output, with source locations) to the given file. Consumed by source-level debuggers such as `dpm debug`."
+      )
+
     help("help").text("Print this usage text")
 
     checkConfig(c => {
@@ -388,6 +398,7 @@ private[script] object RunnerMainConfigIntermediate {
       excludeScriptNames = List(),
       ideLedgerProtocolVersion = None,
       listScriptsJsonFile = None,
+      debugTraceFile = None,
     )
 
   private[script] def parse(args: Array[String]): Option[RunnerMainConfigIntermediate] =

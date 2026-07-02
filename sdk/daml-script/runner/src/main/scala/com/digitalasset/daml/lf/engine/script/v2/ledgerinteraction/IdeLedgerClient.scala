@@ -800,6 +800,16 @@ class IdeLedgerClient(
               .zip(commandResultPackageIds)
               .collect(Function.unlift { case (id, pkgId) => convEvent(id, Some(pkgId)) })
           )
+          machineLogger match {
+            case listener: DebugTraceListener =>
+              listener.onSubmission(
+                actAs.toList.map(p => p: String),
+                readAs.toList.map(p => p: String).sorted,
+                optLocation,
+              )
+              listener.onTransactionTree(tree)
+            case _ => ()
+          }
           val results = ScriptLedgerClient.transactionTreeToCommandResults(tree)
           if (errorBehaviour == ScriptLedgerClient.SubmissionErrorBehaviour.MustFail)
             _currentSubmission = Some(CurrentSubmission(optLocation, tx))

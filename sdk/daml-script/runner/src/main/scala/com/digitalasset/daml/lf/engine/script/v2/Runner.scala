@@ -77,6 +77,10 @@ private[lf] class Runner(
       result: Result[X, Free.Question, ExtendedValue]
   ): Result[X, ScriptF.Cmd, ExtendedValue] =
     result.remapQ { case Free.Question(name, version, payload, stackTrace) =>
+      machineLogger match {
+        case listener: DebugTraceListener => listener.onQuestion(name, version, stackTrace)
+        case _ => ()
+      }
       ScriptF.parse(name, version, payload, knownPackages, env) match {
         case Right(cmd) =>
           Result.Ask(

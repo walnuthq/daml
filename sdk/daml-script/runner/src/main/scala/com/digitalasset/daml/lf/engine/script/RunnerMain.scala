@@ -138,7 +138,15 @@ object RunnerMain {
     for {
       _ <- Future.successful(())
 
-      machineLogger = ScriptMachineLogger()
+      machineLogger = config.debugTraceFile match {
+        case Some(file) => DebugTraceMachineLogger(file)
+        case None => ScriptMachineLogger()
+      }
+      debugListener = (f: DebugTraceListener => Unit) =>
+        machineLogger match {
+          case listener: DebugTraceListener => f(listener)
+          case _ => ()
+        }
       majorVersion = dar.main._2.languageVersion.major
       ifaceDar =
         dar.map { case (pkgId, _) =>
@@ -166,16 +174,23 @@ object RunnerMain {
           convertInputValue: Option[(JsValue, Type) => Either[String, Value]],
       ) =>
         for {
-          result <- Runner
-            .run(
-              compiledPackages,
-              scriptId,
-              convertInputValue,
-              inputFile.map(file => java.nio.file.Files.readString(file.toPath).parseJson),
-              clients,
-              config.timeMode,
-              machineLogger,
-            )
+          result <- {
+            debugListener(_.onScriptStart(scriptId))
+            Runner
+              .run(
+                compiledPackages,
+                scriptId,
+                convertInputValue,
+                inputFile.map(file => java.nio.file.Files.readString(file.toPath).parseJson),
+                clients,
+                config.timeMode,
+                machineLogger,
+              )
+              .transform { outcome =>
+                debugListener(_.onScriptEnd(scriptId, outcome.toEither))
+                outcome
+              }
+          }
           result <- Future {
             outputFile.foreach { outputFile =>
               val pureResult = Value
@@ -265,7 +280,13 @@ object RunnerMain {
         }
 
       }
-    } yield success
+    } yield {
+      machineLogger match {
+        case logger: DebugTraceMachineLogger => logger.close()
+        case _ => ()
+      }
+      success
+    }
 
   def connectToParticipants(
       config: RunnerMainConfig,
