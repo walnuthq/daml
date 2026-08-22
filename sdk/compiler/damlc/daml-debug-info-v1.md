@@ -336,7 +336,19 @@ section 2 producer invariant). Two consequences follow:
   upstream pull requests include DALF size and interpreter overhead
   measurements, so maintainers can judge the cost with data.
 
-## 11. Validation rules for consumers
+## 11. Verification
+
+These rules define what it means for a `daml-debug-info/v1` file to be
+correct. They are what a verifier checks and what a consumer should apply
+before trusting a file. Verification has three levels: the JSON Schema
+covers shape, the rules below cover internal consistency and meaning, and
+the strongest checks compare the file against the artifacts it describes
+(the package id against the DAR, the source hashes against the files on
+disk, and every span against the file it names).
+
+A producer SHOULD be able to run these checks over its own output, so an
+emission bug is caught where it is introduced rather than by a consumer
+later.
 
 - Reject unsupported major schema versions. Ignore unknown fields
   otherwise.
