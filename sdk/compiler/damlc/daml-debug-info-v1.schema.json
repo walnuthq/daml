@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalasset.com/schemas/daml-debug-info/v1.json",
+  "title": "daml-debug-info/v1",
+  "description": "Debug metadata emitted for a compiled Daml package. See daml-debug-info-v1.md.",
+  "type": "object",
+  "required": ["schema", "version", "producer", "package", "sources", "spans", "symbols", "valueSlots", "steps"],
+  "properties": {
+    "schema": { "const": "daml-debug-info/v1" },
+    "version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "Format revision, MAJOR.MINOR. Major must agree with schema."
+    },
+    "producer": {
+      "type": "object",
+      "required": ["tool", "version", "buildMode", "features"],
+      "properties": {
+        "tool": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "buildMode": { "enum": ["experimental", "stable"] },
+        "features": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "package": {
+      "type": "object",
+      "required": ["packageId", "name", "lfVersion", "sdkVersion"],
+      "properties": {
+        "packageId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "lfVersion": { "type": "string", "minLength": 1 },
+        "sdkVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } },
+    "unmappedModules": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "spans": { "type": "array", "items": { "$ref": "#/$defs/span" } },
+    "symbols": { "type": "array", "items": { "$ref": "#/$defs/symbol" } },
+    "valueSlots": { "type": "array", "items": { "$ref": "#/$defs/valueSlot" } },
+    "failureSites": { "type": "array", "items": { "$ref": "#/$defs/failureSite" } },
+    "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "compatibility": { "type": "object" }
+  },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "required": ["line", "column"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      },
+      "description": "1-based. End columns are exclusive; columns count Unicode code points."
+    },
+    "source": {
+      "type": "object",
+      "required": ["id", "module", "path", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "module": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^(?![/~])(?![A-Za-z]:)[^\\u0000]+$" },
+        "uri": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "description": "path must be package-relative; absolute paths are rejected."
+    },
+    "span": {
+      "type": "object",
+      "required": ["id", "source", "kind", "start", "end"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "start": { "$ref": "#/$defs/position" },
+        "end": { "$ref": "#/$defs/position" }
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "required": ["id", "kind", "module", "name", "qualifiedName"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": ["module", "template", "choice", "interface", "interface-choice",
+                   "interface-method", "exception", "record", "variant", "enum", "value"]
+        },
+        "module": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "qualifiedName": { "type": "string", "minLength": 1 },
+        "parent": { "type": "string" },
+        "span": { "type": "string" },
+        "source": { "type": "string" },
+        "type": { "type": "string" },
+        "lfRef": {
+          "type": "object",
+          "required": ["packageId", "module"],
+          "properties": {
+            "packageId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "module": { "type": "string" },
+            "entity": { "type": "string" },
+            "choice": { "type": "string" }
+          }
+        }
+      }
+    },
+    "valueSlot": {
+      "type": "object",
+      "required": ["id", "symbol", "kind", "availability"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "kind": {
+          "enum": ["contract-payload-field", "choice-argument", "choice-argument-field",
+                   "choice-result", "self-contract-id", "choice-controllers",
+                   "choice-observers", "choice-authorizers", "signatories", "observers",
+                   "precondition", "contract-key", "key-maintainers", "interface-view",
+                   "exception-message"]
+        },
+        "availability": { "enum": ["transaction-visible", "interpreter-only"] }
+      },
+      "allOf": [
+        {
+          "description": "Slot kinds that are never transaction-visible (section 6).",
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": ["choice-observers", "choice-authorizers", "precondition",
+                         "key-maintainers", "exception-message"]
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": { "properties": { "availability": { "const": "interpreter-only" } } }
+        }
+      ]
+    },
+    "failureSite": {
+      "type": "object",
+      "required": ["id", "symbol", "source", "kind", "start", "end"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["abort", "error", "assert", "ensure", "fail-with-status", "throw"] },
+        "message": { "type": "string" },
+        "errorId": { "type": "string" },
+        "start": { "$ref": "#/$defs/position" },
+        "end": { "$ref": "#/$defs/position" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["id", "symbol", "index", "source", "start", "end"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "index": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string", "minLength": 1 },
+        "start": { "$ref": "#/$defs/position" },
+        "end": { "$ref": "#/$defs/position" }
+      }
+    }
+  }
+}

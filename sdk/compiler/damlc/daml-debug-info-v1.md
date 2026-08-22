@@ -9,6 +9,10 @@ the metadata from the compiled Daml-LF package rather than by scanning
 source text. The runtime trace is written by the Daml Script runner.
 Section 12 records where the implementation still differs from this text.
 
+A machine-checkable JSON Schema for this format lives beside this document
+at `daml-debug-info-v1.schema.json`. It covers structure. The rules in
+section 11 cover everything a schema cannot express.
+
 The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119.
 
 Status: draft. The format is versioned, and v1 is marked experimental until
@@ -44,6 +48,7 @@ Rules:
 ```json
 {
   "schema": "daml-debug-info/v1",
+  "version": "1.0",
   "producer": { "tool": "damlc", "version": "3.x",
                 "buildMode": "experimental",
                 "features": ["source-spans", "symbols", "lf-refs",
@@ -63,10 +68,30 @@ Rules:
 }
 ```
 
-**Versioning.** `schema` is the major-versioned identifier. Consumers MUST
-reject unsupported major versions and MUST ignore unknown fields in a
-supported one. The `compatibility` object is informative only: producers
-MAY emit it, and consumers MUST NOT rely on it.
+**Versioning.** Two version fields do different jobs, and both are
+required.
+
+`schema` is the major-versioned identifier of the format, for example
+`daml-debug-info/v1`. It is the compatibility gate: a consumer MUST reject
+a document whose major version it does not support, and MUST ignore unknown
+fields in one it does support.
+
+`version` is the precise revision of the format the document follows, as
+`MAJOR.MINOR`, for example `1.0`. Its major part MUST agree with `schema`.
+Minor revisions are additive only: they may add optional fields or new
+enumerated values, never remove or repurpose an existing one. A consumer
+built for `1.0` therefore reads `1.3` safely, and a consumer that wants a
+field added in `1.2` can require it by testing `version` rather than by
+guessing from the presence of the field. Producers SHOULD also list the
+sections they emitted in `producer.features`, which answers "was this
+section omitted or is it genuinely empty".
+
+`producer.version` is a third, unrelated thing: the version of the tool
+that wrote the file, for diagnosing producer bugs. It says nothing about
+the format.
+
+The `compatibility` object is informative only: producers MAY emit it, and
+consumers MUST NOT rely on it.
 
 **Producer invariants.**
 
@@ -92,9 +117,9 @@ MUST convert explicitly.
 
 | Object | Required | Optional |
 | --- | --- | --- |
-| top level | `schema`, `producer`, `package`, `sources`, `spans`, `symbols`, `valueSlots`, `steps` | `unmappedModules`, `failureSites`, `compatibility` |
+| top level | `schema`, `version`, `producer`, `package`, `sources`, `spans`, `symbols`, `valueSlots`, `steps` | `unmappedModules`, `failureSites`, `compatibility` |
 | `producer` | `tool`, `version`, `buildMode`, `features` | |
-| `package` | `packageId`, `name`, `lfVersion`, `sdkVersion` | `version` |
+| `package` | `packageId`, `name`, `lfVersion`, `sdkVersion` | `version` (present whenever the package declares one, which upgradable packages always do) |
 | source | `id`, `module`, `path`, `sha256` | `uri` |
 | span | `id`, `source`, `kind`, `start`, `end` | |
 | symbol | `id`, `kind`, `module`, `name`, `qualifiedName` | `parent`, `span`, `source`, `lfRef`, `type` |
