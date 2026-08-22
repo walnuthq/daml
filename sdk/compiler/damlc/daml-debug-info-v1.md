@@ -416,10 +416,12 @@ later.
 The reference implementation
 (`walnuthq/daml@feature/debug-info`,
 `walnuthq/dpm-trace@feature/debug-info`) emits the
-following today: `source-spans`, `symbols`, `lf-refs`, `value-slots`,
-`steps`, the informative `compatibility` object, the sidecar and DAR-member
-copies rendered from one serialization, and the section 9 runtime trace with
-IDE-ledger event emission.
+following today: the `schema` and `version` fields, `source-spans`,
+`symbols`, `lf-refs`, `value-slots`, `steps`, the informative
+`compatibility` object, the sidecar and DAR-member copies rendered from one
+serialization, and the section 9 runtime trace with IDE-ledger event
+emission. `dpm debug-info verify` implements the section 11 checks against
+the JSON Schema beside this document.
 
 Specified here but not yet emitted: `failureSites` (section 7),
 `unmappedModules` (section 3), debug builds and the `step` events they
