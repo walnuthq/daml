@@ -272,6 +272,7 @@ run do not interleave.
  "argument":{...}}
 {"event":"exercised","templateId":"<pkgid>:Asset:Asset","interfaceId":null,
  "choice":"Transfer","contractId":"00..","argument":{...},"result":...}
+{"event":"step","location":{LOC}}
 {"event":"script-end","status":"success"}
 {"event":"script-end","status":"error","error":"...","location":{LOC}}
 ```
@@ -284,6 +285,25 @@ top-level definition within `module` (the `script-start` field
 `Module:definition` is its qualified form). `location` may be `null` when
 the runtime has no location. Trace locations join metadata spans and steps
 by `(packageId, module, start, end)`, as in section 8.
+
+**Step events.** A `step` event reports that evaluation reached a source
+location. Ordinary builds do not produce them: they come from a debug
+build, which a producer emits on request (`daml build --debug` in the
+reference implementation) and which carries a marker at each source
+location the metadata records in `steps`. A debugger joins a `step` event
+to the `steps` table by `(packageId, module, start, end)` as in section 8,
+so it can show the line about to run.
+
+Because the markers are compiled into the package, a debug build has a
+different package id from an ordinary build of the same source, in the same
+way a `-g -O0` binary differs from a release binary. A debug build is for
+local development. Metadata emission itself never changes the package id
+(section 2), so the two concerns stay separate: any build can carry
+metadata, and only a debug build can be stepped through.
+
+A consumer that receives `step` events synchronously MAY delay returning
+from the callback in order to pause evaluation, which is how a debugger
+implements breakpoints without the interpreter needing to know about them.
 
 **Value encoding.** `argument` and `result` values are encoded with the
 daml-lf API JSON codec (`ApiCodecCompressed`, the compact encoding used by
@@ -369,14 +389,16 @@ later.
 ## 12. Reference implementation status
 
 The reference implementation
-(`walnuthq/daml@feature/debug-info`, `walnuthq/dpm-trace`) emits the
+(`walnuthq/daml@feature/debug-info`,
+`walnuthq/dpm-trace@feature/debug-info`) emits the
 following today: `source-spans`, `symbols`, `lf-refs`, `value-slots`,
 `steps`, the informative `compatibility` object, the sidecar and DAR-member
 copies rendered from one serialization, and the section 9 runtime trace with
 IDE-ledger event emission.
 
-Specified here but not yet emitted: `failureSites`
-(section 7), `unmappedModules` (section 3), the package-id invariance CI test (section 2),
+Specified here but not yet emitted: `failureSites` (section 7),
+`unmappedModules` (section 3), debug builds and the `step` events they
+produce (section 9), the package-id invariance CI test (section 2),
 reclassifying `choice-observers` and `key-maintainers` to
 `interpreter-only` in the emitter (the prototype labels them
 `transaction-visible`), and optional ledger-mode emission of trace events
