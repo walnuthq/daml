@@ -22,6 +22,7 @@ module DA.Cli.Damlc.DebugInfo
   ( writeDamlDebugInfo
   , buildDebugInfo
   , debugInfoSchema
+  , debugInfoVersion
   , debugInfoDarEntryPath
   ) where
 
@@ -61,6 +62,12 @@ import System.FilePath ((<.>), isAbsolute, joinPath, makeRelative, normalise, re
 -- | Stable schema identifier of the emitted artifact.
 debugInfoSchema :: T.Text
 debugInfoSchema = "daml-debug-info/v1"
+
+-- | Precise revision of the format this emitter writes, as MAJOR.MINOR.
+-- The major part must agree with 'debugInfoSchema'. Minor revisions are
+-- additive only, so a consumer written for an earlier minor keeps working.
+debugInfoVersion :: T.Text
+debugInfoVersion = "1.0"
 
 -- | Path of the metadata member embedded into the DAR.
 debugInfoDarEntryPath :: LF.PackageId -> FilePath
@@ -155,6 +162,7 @@ data DebugInfo = DebugInfo
 instance ToJSON DebugInfo where
   toJSON DebugInfo{..} = object
     [ "schema" .= debugInfoSchema
+    , "version" .= debugInfoVersion
     , "producer" .= object
         [ "tool" .= ("damlc" :: T.Text)
         , "version" .= diSdkVersion
