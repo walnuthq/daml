@@ -4,7 +4,7 @@ Draft specification of the Daml debug metadata format, and of the runtime
 debug trace that source-level debuggers consume.
 
 This document is implementation-backed. The producer is
-`daml build --experimental-debug-info` in this repository, which derives
+`daml build --debug-info` in this repository, which derives
 the metadata from the compiled Daml-LF package rather than by scanning
 source text. The runtime trace is written by the Daml Script runner.
 Section 12 records where the implementation still differs from this text.

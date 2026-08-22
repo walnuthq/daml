@@ -570,8 +570,8 @@ cmdBuildParser numProcessors =
 
 debugInfoFlagOpt :: Parser DebugInfoFlag
 debugInfoFlagOpt = DebugInfoFlag <$> switch
-    (  long "experimental-debug-info"
-    <> help "Emit an experimental Daml debug-info JSON sidecar next to the DAR."
+    (  long "debug-info"
+    <> help "Emit a daml-debug-info JSON sidecar next to the DAR, and embed it in the DAR."
     )
 
 cmdClean :: Mod CommandFields Command
