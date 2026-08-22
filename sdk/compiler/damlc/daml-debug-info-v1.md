@@ -313,9 +313,9 @@ by `(packageId, module, start, end)`, as in section 8.
 
 **Step events.** A `step` event reports that evaluation reached a source
 location. Ordinary builds do not produce them: they come from a debug
-build, which a producer emits on request (`daml build --debug` in the
-reference implementation) and which carries a marker at each source
-location the metadata records in `steps`. A debugger joins a `step` event
+build, which a producer emits on request (`daml build --debug-build` in the
+reference implementation, implying `--debug-info`) and which carries a
+marker at each source location the metadata records in `steps`. A debugger joins a `step` event
 to the `steps` table by `(packageId, module, start, end)` as in section 8,
 so it can show the line about to run.
 
